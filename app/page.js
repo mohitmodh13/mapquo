@@ -2,8 +2,10 @@
 import { useEffect, useRef, useState } from 'react';
 import 'leaflet/dist/leaflet.css';
 import { areaSqFt } from '../lib/geo.js';
+import { validatePolygon } from '../lib/geo.js';
 import { QUESTIONS } from '../lib/questions.js';
-import { DISCLAIMER } from '../lib/config.js';
+import { BUSINESS, DISCLAIMER, REASONS, SERVICES, SERVICE_ZIPS } from '../lib/config.js';
+import { calculate } from '../lib/pricing.js';
 
 const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 const money = (n) => '$' + Math.round(n).toLocaleString('en-US');
@@ -73,10 +75,7 @@ function Site({ site, setSite, onNext }) {
 
 function Result({ r, onRestart }) {
   const [visit, setVisit] = useState(false);
-  async function requestVisit() {
-    await fetch('/api/estimate', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: r.code }) });
-    setVisit(true);
-  }
+  function requestVisit() { setVisit(true); }
   const svcName = QUESTIONS.service_type.options.find((o) => o[0] === r.service)?.[1];
   if (r.status === 'outside_service_area') return (<section><h1>We received your request</h1>
     <p>That address is outside the area {r.business} serves right now, so we can’t show an estimate. Your reference is <b>{r.code}</b>.</p>
@@ -128,11 +127,17 @@ export default function Page() {
     key.current ||= crypto.randomUUID(); // idempotency: a retry returns the same estimate
     try {
       const answers = { ...ans, existing_surface: ans.service_type === 'sealcoat' ? 'asphalt' : ans.existing_surface };
-      const res = await fetch('/api/estimate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idempotencyKey: key.current, address: site.address, postal: site.postal, polygon: site.polygon, answers, customer: contact }) });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Something went wrong. Try again.');
-      setResult(data); next();
+      const polygon = validatePolygon(site.polygon);
+      if (!polygon.ok) throw new Error(polygon.error);
+      const pricing = SERVICES[answers.service_type];
+      const calc = !SERVICE_ZIPS.has(site.postal.trim()) ? { status: 'outside_service_area', reasons: [] }
+        : !pricing || pricing.estimate_mode !== 'automatic' ? { status: 'manual_review', reasons: [] }
+        : calculate({ sqft: polygon.sqft, answers, pricing });
+      const data = { code: 'MQ-' + key.current.slice(0, 8).toUpperCase(), status: calc.status, sqft: polygon.sqft,
+        business: BUSINESS.name, service: answers.service_type, scope: pricing?.scope_display_text, low: calc.low,
+        high: calc.high, breakdown: calc.breakdown, reasons: (calc.reasons || []).map((r) => REASONS[r].message) };
+      setResult(data);
+      next();
     } catch (e) { setError(e.message); }
     setBusy(false);
   }
